@@ -1,0 +1,589 @@
+---
+title: "Vaccine Equity Globally, LIC/LMIC only"
+author: "Alexandra Savinkina"
+date: "1/15/2022"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(error = TRUE)
+```
+
+```{r library, message = FALSE, include=FALSE}
+library(tidyverse)
+library(zoo)
+library(xtable)
+library(dampack)
+library(matrixStats)
+library(lemon)
+library(janitor)
+```
+
+```{r, echo=FALSE}
+
+# Read in data
+
+#setwd("~/Documents/Rotations/Gonsalves/COVIDVaccineEquity")
+
+Vaccine_equity_region <- read.csv(file="Results/Vaccine_equity_for_SA_12.13.21_lowincome.csv")
+
+# Limit data to LIC/LMIC
+
+Vaccine_equity_region$region_pop <- as.numeric(Vaccine_equity_region$region_pop)
+Vaccine_equity_region$region_fully_vaccinated <- as.numeric(Vaccine_equity_region$region_fully_vaccinated)
+Vaccine_equity_region$region_vaccinated <- as.numeric(Vaccine_equity_region$region_vaccinated)
+
+Vaccine_equity_region <- Vaccine_equity_region %>%
+  adorn_totals("row")
+
+Vaccine_equity_region[7,c(1,2)] <- "Global"
+
+Vaccine_equity_region <- Vaccine_equity_region[7,]
+
+
+# Create function that uses inputs for IFR, vaccine efficacy on mortality, and cost of vaccine dose
+
+  # This parameter isn't currently used (set to 1), but allows us to assign a % of excess deaths due to COVID.
+  #   for the US this is ~75%
+percent_excess_covid = 1
+
+
+deaths_averted <- function(params){
+  
+  # Assign values to changing parameters- in this instance they'll come from the PSA list
+  
+  IFR_old <- params[["IFR_old"]]
+  IFR_new <- params[["IFR_new"]]
+  vaccine_mortality_efficacy <- params[["vaccine_mortality_efficacy"]]
+  vaccine_mortality_efficacy_two <- params[["vaccine_mortality_efficacy_two"]]
+  cost_of_dose <- params[["cost_of_dose"]]
+  natural_immunity <-params[["natural_immunity"]] 
+  
+  # Assign variable for % previously infected: (Number deaths/IFR)/ population. This is done using 4 metrics of mortality:
+  # (1) recorded deaths (2) excess deaths (3) excess deaths, lower 5% CI, (4) excess deaths, upper 95% CI
+  
+  Vaccine_equity_region <- Vaccine_equity_region %>%
+    mutate(infection_percent_covid_deaths = (region_covid_deaths/IFR_old)/region_pop,
+           infection_percent_excess_deaths = ((region_excess_deaths*percent_excess_covid)/IFR_old)/region_pop,
+           infection_percent_excess_deaths_lower5 = ((region_excess_deaths_5*percent_excess_covid)/IFR_old)/region_pop,
+           infection_percent_excess_deaths_upper5 = ((region_excess_deaths_95*percent_excess_covid)/IFR_old)/region_pop)
+  
+  
+   # Correct for any estimates of >100% of population previously infected (possible with very low IFR)
+  
+  Vaccine_equity_region$infection_percent_covid_deaths <- ifelse(Vaccine_equity_region$infection_percent_covid_deaths>1,1,Vaccine_equity_region$infection_percent_covid_deaths)
+
+  Vaccine_equity_region$infection_percent_excess_deaths <- ifelse(Vaccine_equity_region$infection_percent_excess_deaths>1,1,Vaccine_equity_region$infection_percent_excess_deaths)
+
+  Vaccine_equity_region$infection_percent_excess_deaths_lower5 <- ifelse(Vaccine_equity_region$infection_percent_excess_deaths_lower5>1,1,Vaccine_equity_region$infection_percent_excess_deaths_lower5)
+
+  Vaccine_equity_region$infection_percent_excess_deaths_upper5 <- ifelse(Vaccine_equity_region$infection_percent_excess_deaths_upper5>1,1,Vaccine_equity_region$infection_percent_excess_deaths_upper5)
+  
+  # Calculate % vaccinated (number vaccinated/population) and % fully vaccinated (number fully vaccinated/population)
+  
+  Vaccine_equity_region<- Vaccine_equity_region %>%
+    mutate(vaccinated_percent = region_vaccinated / region_pop,
+           fully_vaccinated_percent = region_fully_vaccinated / region_pop)
+  
+  # Calculate number vaccine doses needed to fully vaccinate population (fully vaccinated: 0, partly vaccinated:1, all
+  # others: 2.
+  #For omicron booster: add one more dose per population)
+  
+  Vaccine_equity_region <- Vaccine_equity_region %>%
+    mutate(vaccine_needed = (vaccinated_percent - fully_vaccinated_percent)*region_pop + 2*
+             (1-vaccinated_percent)*region_pop + region_pop) 
+
+# Calculate number at risk, deaths averted, and vaccination percent
+    
+  Vaccine_equity_region1 <- Vaccine_equity_region %>%
+    
+    # calculate # at risk of COVID death given different previous infection metrics (assuming everyone already infected
+    # is safe from re-infection/death). 
+  mutate(number_at_risk_covid_deaths2 = ((1-infection_percent_covid_deaths)*(1-fully_vaccinated_percent)+
+           infection_percent_covid_deaths * (1-fully_vaccinated_percent) * (1-natural_immunity)) *region_pop + (infection_percent_covid_deaths*fully_vaccinated_percent * (1-natural_immunity)*(1-vaccine_mortality_efficacy_two))* region_pop,
+         
+         number_at_risk_excess_deaths2 = ((1-infection_percent_excess_deaths)*(1-fully_vaccinated_percent)+
+           infection_percent_excess_deaths * (1-fully_vaccinated_percent) * (1-natural_immunity)) *region_pop + (infection_percent_excess_deaths*fully_vaccinated_percent * (1-natural_immunity)*(1-vaccine_mortality_efficacy_two))* region_pop,
+  
+          number_at_risk_excess_deaths_lower52 = ((1-infection_percent_excess_deaths_lower5)*(1-fully_vaccinated_percent)+
+           infection_percent_excess_deaths_lower5 * (1-fully_vaccinated_percent) * (1-natural_immunity)) *region_pop + (infection_percent_excess_deaths_lower5*fully_vaccinated_percent * (1-natural_immunity)*(1-vaccine_mortality_efficacy_two))* region_pop,
+        
+              number_at_risk_excess_deaths_upper52 = ((1-infection_percent_excess_deaths_upper5)*(1-fully_vaccinated_percent)+
+           infection_percent_excess_deaths_upper5 * (1-fully_vaccinated_percent) * (1-natural_immunity)) *region_pop + (infection_percent_excess_deaths_upper5*fully_vaccinated_percent * (1-natural_immunity)*(1-vaccine_mortality_efficacy_two))* region_pop,
+  
+           
+           # Assuming number at risk is everyone not vaccinated (ignoring previous infection)
+        number_at_risk_vaccination = (1-fully_vaccinated_percent)*region_pop+
+           (fully_vaccinated_percent*(1-vaccine_mortality_efficacy_two))*region_pop) %>%
+    
+    # Calculate deaths averted based on different number at risk calculations (number at risk * IFR * vaccine mortality
+    # efficacy)
+    
+    mutate(deaths_averted_covid_percent= number_at_risk_covid_deaths2*IFR_new*vaccine_mortality_efficacy,
+           deaths_averted_excess_percent= number_at_risk_excess_deaths2*IFR_new*vaccine_mortality_efficacy,
+           deaths_averted_excess_lower5_percent= number_at_risk_excess_deaths_lower52*IFR_new*vaccine_mortality_efficacy,
+           deaths_averted_excess_upper5_percent= number_at_risk_excess_deaths_upper52*IFR_new*vaccine_mortality_efficacy,
+           deaths_averted_vaccination= number_at_risk_vaccination*IFR_new*vaccine_mortality_efficacy) %>%
+    
+    # Calculate cost per death averted (cost of dose* vaccines needed)/deaths averted.
+    
+    mutate(cost_per_death_averted_covid_death = (cost_of_dose*vaccine_needed)/deaths_averted_covid_percent,
+           cost_per_death_averted_excess_death = (cost_of_dose*vaccine_needed)/deaths_averted_excess_percent,
+           cost_per_death_averted_excess_death_lower5 = (cost_of_dose*vaccine_needed)/deaths_averted_excess_lower5_percent,
+           cost_per_death_averted_excess_death_upper5 = (cost_of_dose*vaccine_needed)/deaths_averted_excess_upper5_percent,
+           cost_per_death_averted_vaccination = (cost_of_dose*vaccine_needed)/deaths_averted_vaccination) 
+  
+    # Output printed is cost per death averted, deaths averted, and total cost
+  
+  return(data.frame(Calculation=c("Reported deaths","Excess deaths", "Excess deaths lower 95%", "Excess deaths upper 95%",
+                                  "Vaccination only"),
+                    Cost_per_death = c(Vaccine_equity_region1$cost_per_death_averted_covid_death,
+                             Vaccine_equity_region1$cost_per_death_averted_excess_death,
+                             Vaccine_equity_region1$cost_per_death_averted_excess_death_lower5,
+                             Vaccine_equity_region1$cost_per_death_averted_excess_death_upper5,
+                             Vaccine_equity_region1$cost_per_death_averted_vaccination),
+                    Cost_total = Vaccine_equity_region1$vaccine_needed*cost_of_dose,
+                    Deaths_averted = c(Vaccine_equity_region1$deaths_averted_covid_percent,
+                                       Vaccine_equity_region1$deaths_averted_excess_percent,
+                                       Vaccine_equity_region1$deaths_averted_excess_lower5_percent,
+                                       Vaccine_equity_region1$deaths_averted_excess_upper5_percent,
+                                       Vaccine_equity_region1$deaths_averted_vaccination)))
+  
+}
+
+# Sensitivity analysis code:
+
+# 3 sets of parameters: low, medium, and high for IFR, low and high for vaccine efficacy
+
+# Low IFR low vaccine efficacy
+
+low_low_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(0.5/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.9,each=6),
+    vaccine_mortality_efficacy_two = rep(0.8, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+low_low <- data.frame(low_low_data)
+
+# Medium IFR low vaccine efficacy
+
+med_low_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(1/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.9,each=6),
+    vaccine_mortality_efficacy_two = rep(0.8, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+med_low <- data.frame(med_low_data)
+
+# High IFR low vaccine efficacy
+
+high_low_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(5/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.9,each=6),
+    vaccine_mortality_efficacy_two = rep(0.8, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+high_low <- data.frame(high_low_data)
+
+# High IFR high vaccine efficacy
+
+high_high_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(5/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.99,each=6),
+    vaccine_mortality_efficacy_two = rep(0.8, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+high_high <- data.frame(high_high_data)
+
+# Med IFR high vaccine efficacy
+
+med_high_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(1/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.99,each=6),
+    vaccine_mortality_efficacy_two = rep(0.8, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+med_high <- data.frame(med_high_data)
+
+# Low IFR high vaccine efficacy
+
+low_high_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(.5/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.99,each=6),
+    vaccine_mortality_efficacy_two = rep(0.8, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+low_high <- data.frame(low_high_data)
+
+# For vaccine hesitancy analysis:
+
+# Low IFR hesitant vaccine efficacy
+
+low_hesitant_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(.5/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.68,each=6),
+    vaccine_mortality_efficacy_two = rep(0.6, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+low_hesitant <- data.frame(low_hesitant_data)
+
+# Medium IFR hesitant vaccine efficacy
+
+med_hesitant_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(1/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.68,each=6),
+    vaccine_mortality_efficacy_two = rep(0.6, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+med_hesitant <- data.frame(med_hesitant_data)
+
+# High IFR hesitant vaccine efficacy
+
+high_hesitant_data <- 
+  list(
+    IFR_old = rep(5/1000,each=6),
+    IFR_new = rep(5/1000,each=6),
+    vaccine_mortality_efficacy= rep(0.68,each=6),
+    vaccine_mortality_efficacy_two = rep(0.6, each=6),
+    cost_of_dose = seq(from=5, to=10, by=1),
+    natural_immunity = rep(0.8,each=6)
+  )
+
+#  Change to dataset format
+
+high_hesitant <- data.frame(high_hesitant_data)
+
+
+# Built datasets to fill-in with for-loop for sensitivities
+
+# Cost per death
+
+low_low_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(low_low_costperdeath) <- c("values","5","6","7","8","9","10")
+low_low_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+med_low_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(med_low_costperdeath) <- c("values","5","6","7","8","9","10")
+med_low_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+high_low_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(high_low_costperdeath) <- c("values","5","6","7","8","9","10")
+high_low_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+low_high_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(low_high_costperdeath) <- c("values","5","6","7","8","9","10")
+low_high_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+med_high_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(med_high_costperdeath) <- c("values","5","6","7","8","9","10")
+med_high_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+high_high_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(high_high_costperdeath) <- c("values","5","6","7","8","9","10")
+high_high_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+low_hesitant_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(low_hesitant_costperdeath) <- c("values","5","6","7","8","9","10")
+low_hesitant_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+med_hesitant_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(med_hesitant_costperdeath) <- c("values","5","6","7","8","9","10")
+med_hesitant_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+high_hesitant_costperdeath <- data.frame(matrix(ncol=7, nrow=4))
+colnames(high_hesitant_costperdeath) <- c("values","5","6","7","8","9","10")
+high_hesitant_costperdeath$values <- c("reported deaths","excess deaths","excess deaths 5%","excess deaths 95%")
+
+
+# For loop running PSA- runs deaths_averted function for each row of PSA, and saves data to correct output dataframes
+
+
+for (i in 1:6) {
+  
+  #Initial SA
+  
+  output_low_low <- deaths_averted(low_low[i,])
+  output_med_low <- deaths_averted(med_low[i,])
+  output_high_low <- deaths_averted(high_low[i,])
+  output_low_high <- deaths_averted(low_high[i,])
+  output_med_high <- deaths_averted(med_high[i,])
+  output_high_high <- deaths_averted(high_high[i,])
+  
+  #Vaccine hesitancy
+  
+  output_low_hesitant <- deaths_averted(low_hesitant[i,])
+  output_med_hesitant <- deaths_averted(med_hesitant[i,])
+  output_high_hesitant <- deaths_averted(high_hesitant[i,])
+  
+  # Cost per death
+  
+  #   Initial SA 
+  
+  low_low_costperdeath[1,i+1] <- output_low_low[1,2]
+  low_low_costperdeath[2,i+1] <- output_low_low[2,2]
+  low_low_costperdeath[3,i+1] <- output_low_low[3,2]
+  low_low_costperdeath[4,i+1] <- output_low_low[4,2]
+  
+  med_low_costperdeath[1,i+1] <- output_med_low[1,2]
+  med_low_costperdeath[2,i+1] <- output_med_low[2,2]
+  med_low_costperdeath[3,i+1] <- output_med_low[3,2]
+  med_low_costperdeath[4,i+1] <- output_med_low[4,2]
+  
+  high_low_costperdeath[1,i+1] <- output_high_low[1,2]
+  high_low_costperdeath[2,i+1] <- output_high_low[2,2]
+  high_low_costperdeath[3,i+1] <- output_high_low[3,2]
+  high_low_costperdeath[4,i+1] <- output_high_low[4,2]
+  
+  low_high_costperdeath[1,i+1] <- output_low_high[1,2]
+  low_high_costperdeath[2,i+1] <- output_low_high[2,2]
+  low_high_costperdeath[3,i+1] <- output_low_high[3,2]
+  low_high_costperdeath[4,i+1] <- output_low_high[4,2]
+  
+  med_high_costperdeath[1,i+1] <- output_med_high[1,2]
+  med_high_costperdeath[2,i+1] <- output_med_high[2,2]
+  med_high_costperdeath[3,i+1] <- output_med_high[3,2]
+  med_high_costperdeath[4,i+1] <- output_med_high[4,2]
+  
+  high_high_costperdeath[1,i+1] <- output_high_high[1,2]
+  high_high_costperdeath[2,i+1] <- output_high_high[2,2]
+  high_high_costperdeath[3,i+1] <- output_high_high[3,2]
+  high_high_costperdeath[4,i+1] <- output_high_high[4,2]
+  
+  #   Vaccine hesitancy
+  
+  low_hesitant_costperdeath[1,i+1] <- output_low_hesitant[1,2]
+  low_hesitant_costperdeath[2,i+1] <- output_low_hesitant[2,2]
+  low_hesitant_costperdeath[3,i+1] <- output_low_hesitant[3,2]
+  low_hesitant_costperdeath[4,i+1] <- output_low_hesitant[4,2]
+  
+  med_hesitant_costperdeath[1,i+1] <- output_med_hesitant[1,2]
+  med_hesitant_costperdeath[2,i+1] <- output_med_hesitant[2,2]
+  med_hesitant_costperdeath[3,i+1] <- output_med_hesitant[3,2]
+  med_hesitant_costperdeath[4,i+1] <- output_med_hesitant[4,2]
+  
+  high_hesitant_costperdeath[1,i+1] <- output_high_hesitant[1,2]
+  high_hesitant_costperdeath[2,i+1] <- output_high_hesitant[2,2]
+  high_hesitant_costperdeath[3,i+1] <- output_high_hesitant[3,2]
+  high_hesitant_costperdeath[4,i+1] <- output_high_hesitant[4,2]
+  
+}
+
+IFR_low <- "5/10,000"
+IFR_medium <- "1/1,000"
+IFR_high <- "5/1,000"
+
+vaccine_efficacy_high <- "99%"
+vaccine_efficacy_low <- "90%"
+vaccine_efficacy_hesitancy <- "68%"
+
+#  Cost per death
+
+low_low_costperdeath1 <- gather(low_low_costperdeath, key="dose cost", value="cost per death averted", -values)
+low_low_costperdeath1$IFR <- IFR_low
+low_low_costperdeath1$vaccine_efficacy <- vaccine_efficacy_low
+med_low_costperdeath1 <- gather(med_low_costperdeath, key="dose cost", value="cost per death averted", -values)
+med_low_costperdeath1$IFR <- IFR_medium
+med_low_costperdeath1$vaccine_efficacy <- vaccine_efficacy_low
+high_low_costperdeath1 <- gather(high_low_costperdeath, key="dose cost", value="cost per death averted", -values)
+high_low_costperdeath1$IFR <- IFR_high
+high_low_costperdeath1$vaccine_efficacy <- vaccine_efficacy_low
+low_high_costperdeath1 <- gather(low_high_costperdeath, key="dose cost", value="cost per death averted", -values)
+low_high_costperdeath1$IFR <- IFR_low
+low_high_costperdeath1$vaccine_efficacy <- vaccine_efficacy_high
+med_high_costperdeath1 <- gather(med_high_costperdeath, key="dose cost", value="cost per death averted", -values)
+med_high_costperdeath1$IFR <- IFR_medium
+med_high_costperdeath1$vaccine_efficacy <- vaccine_efficacy_high
+high_high_costperdeath1 <- gather(high_high_costperdeath, key="dose cost", value="cost per death averted", -values)
+high_high_costperdeath1$IFR <- IFR_high
+high_high_costperdeath1$vaccine_efficacy <- vaccine_efficacy_high
+
+cost_per_death <- rbind(low_low_costperdeath1,med_low_costperdeath1,high_low_costperdeath1,
+                        low_high_costperdeath1,med_high_costperdeath1,high_high_costperdeath1)
+
+
+cost_per_death$dose_cost <- as.numeric(cost_per_death$`dose cost`)
+cost_per_death$IFR <- factor(cost_per_death$IFR, levels=c("5/10,000","1/1,000","5/1,000"))
+
+
+# Vaccine hesitancy
+
+low_hesitant_costperdeath1 <- gather(low_hesitant_costperdeath, key="dose cost", value="cost per death averted", -values)
+low_hesitant_costperdeath1$IFR <- IFR_low
+low_hesitant_costperdeath1$vaccine_efficacy <- vaccine_efficacy_hesitancy
+med_hesitant_costperdeath1 <- gather(med_hesitant_costperdeath, key="dose cost", value="cost per death averted", -values)
+med_hesitant_costperdeath1$IFR <- IFR_medium
+med_hesitant_costperdeath1$vaccine_efficacy <- vaccine_efficacy_hesitancy
+high_hesitant_costperdeath1 <- gather(high_hesitant_costperdeath, key="dose cost", value="cost per death averted", -values)
+high_hesitant_costperdeath1$IFR <- IFR_high
+high_hesitant_costperdeath1$vaccine_efficacy <- vaccine_efficacy_hesitancy
+
+cost_per_death_hesitant <- rbind(low_hesitant_costperdeath1,med_hesitant_costperdeath1,high_hesitant_costperdeath1)
+
+
+cost_per_death_hesitant$dose_cost <- as.numeric(cost_per_death_hesitant$`dose cost`)
+cost_per_death_hesitant$IFR <- factor(cost_per_death_hesitant$IFR, levels=c("5/10,000","1/1,000","5/1,000"))
+
+# Deaths
+
+
+
+Deaths <- data.frame(matrix(ncol=3, nrow=9))
+colnames(Deaths) <- c("IFR","vaccine_efficacy", "deaths_averted")
+Deaths$IFR <- c(.0005,0.001,0.005,.0005,0.001,0.005,.0005,0.001,0.005)
+Deaths$vaccine_efficacy <- c("90%","90%","90%","99%","99%","99%","75%","75%","75%")
+
+Deaths[1,3] <- output_low_low[2,4]
+Deaths[2,3] <- output_med_low[2,4]
+Deaths[3,3] <- output_high_low[2,4]
+Deaths[4,3] <- output_low_high[2,4]
+Deaths[5,3] <- output_med_high[2,4]
+Deaths[6,3] <- output_high_high[2,4]
+Deaths[7,3] <- output_low_hesitant[2,4]
+Deaths[8,3] <- output_med_hesitant[2,4]
+Deaths[9,3] <- output_high_hesitant[2,4]
+
+#Deaths$IFR1 <- as.numeric(Deaths$IFR)
+Deaths$vaccine_efficacy <- factor(Deaths$vaccine_efficacy, levels=c("75%","90%","99%"))
+Deaths$deaths_averted_hundredthous <- Deaths$deaths_averted/100000
+
+```
+
+# Preliminary data, from probabilistic sensitivity analysis
+
+
+### Assuming "pre-omicron" IFR= 5/1000, omicron IFR= 1/1000, vaccine efficacy against mortality = 90%, natural immunity efficacy against mortality of 80%, and cost per dose= $7, 
+
+```{r, echo=FALSE,render=lemon_print}
+
+basecase <- 
+  list(
+    IFR_old = 5/1000,
+    IFR_new = 1/1000,
+    vaccine_mortality_efficacy= 0.9,
+    vaccine_mortality_efficacy_two = 0.8,
+    cost_of_dose = 7,
+    natural_immunity=0.8
+  )
+
+ output <-deaths_averted(basecase)
+
+xtable(output, row.names = FALSE)
+
+```
+
+#Vaccine Hesitancy Scenario
+
+```{r, echo=FALSE,render=lemon_print}
+
+basecase <- 
+  list(
+    IFR_old = 5/1000,
+    IFR_new = 1/1000,
+    vaccine_mortality_efficacy= 0.68,
+    vaccine_mortality_efficacy_two = 0.6,
+    cost_of_dose = 7,
+    natural_immunity=0.8
+  )
+
+ output <-deaths_averted(basecase)
+
+xtable(output, row.names = FALSE)
+
+```
+
+## Sensitivity Analysis
+
+Sensitivity analysis looking at cost-per-death averted of COVID-19 vaccination for three doses of vaccine, using a range of IFR, vaccine efficacy against mortality, and cost-per-dose of vaccine delivered. IFR range includes the estimate for pre-Omicron IFR (5/1,000), and estimates for Omicron including 1/10th IFR (5/10,000), and 1/5th IFR (1/1,000). Vaccine efficacy against mortality is estimated at 90% for the low range and 99% for the high range. Cost-per-dose of vaccine is ranged fro $5 to $10. In addition, the estimates use excess mortality data to estimate previous infection and an 80% natural immunity effect on mortality.
+
+```{r, echo=FALSE,message = FALSE}
+
+#   Create line plots for cost per death averted by cost per dose, IFR level, and vaccine efficacy level
+
+cost_per_death_excess <- cost_per_death[which(cost_per_death$values=="excess deaths"),]
+
+write.csv(cost_per_death_excess, file="~/Documents/Rotations/Gonsalves/Code/Rmarkdown/For_graph_cost_threedose.csv")
+
+
+require(scales)
+ggplot(cost_per_death_excess) + geom_line(aes(x=dose_cost,y=`cost per death averted`)) + facet_grid(IFR~ vaccine_efficacy, scales="free") + theme_bw() + scale_y_continuous(labels = dollar) + scale_x_continuous(labels = dollar) + labs(y = "Cost per death averted, USD$", x = "Cost per dose of vaccine delivered, USD$")
+
+
+cost_per_death_hesitant <- cost_per_death_hesitant[which(cost_per_death_hesitant$values=="excess deaths"),]
+
+write.csv(cost_per_death_hesitant, file="~/Documents/Rotations/Gonsalves/Code/Rmarkdown/For_graph_cost_threedose_hesitant.csv")
+
+write.csv(Deaths, file="~/Documents/Rotations/Gonsalves/Code/Rmarkdown/For_graph_deaths_threedose.csv")
+
+
+require(scales)
+ggplot(cost_per_death_hesitant) + geom_line(aes(x=dose_cost,y=`cost per death averted`)) + facet_grid(IFR~ vaccine_efficacy, scales="free") + theme_bw() + scale_y_continuous(labels = dollar) + scale_x_continuous(labels = dollar) + labs(y = "Cost per death averted, USD$", x = "Cost per dose of vaccine delivered, USD$")
+
+ggplot(Deaths) + geom_line(aes(x=IFR,y=deaths_averted_hundredthous, color=vaccine_efficacy)) + theme_bw()  + labs(y = "Deaths averted, in hundred thousands", x = "IFR", color="Vaccine efficacy against mortality") + xlim(0.0005,0.005) 
+
+
+```
+
+
+Sensitivity analysis results
+
+```{r, echo=FALSE,render=lemon_print}
+
+xtable(cost_per_death_excess[which(cost_per_death_excess$dose_cost==7),], row.names = FALSE)
+  
+xtable(cost_per_death_hesitant[which(cost_per_death_hesitant$dose_cost==7),], row.names = FALSE)
+  
+xtable(Deaths, row.names = FALSE)
+
+```
+
